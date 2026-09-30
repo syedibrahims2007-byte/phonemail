@@ -1,0 +1,219 @@
+Phone-Number-Based Authentication System: Implementation Guidance
+Design stance
+
+Treat the phone number as the login handle, not the primary key. Numbers get recycled, ported, and changed. Every account gets an immutable opaque ID, and the phone number is a verified, revocable binding attached to it. Almost every recovery and takeover problem below comes from confusing "who owns this number now" with "who owns this account."
+
+SMS and voice OTP are weak authenticators (NIST treats PSTN-delivered codes as "restricted"). I'd build it so phone OTP bootstraps and recovers accounts while passkeys and device-bound keys handle daily login. That keeps your phone-only identity model but shrinks SMS cost and SIM-swap exposure.
+
+Some places can't be fully email-free, such as vendor edges and certain legal notices. I flag these where they come up.
+
+1. Core authentication flow
+
+Entry and normalization
+
+One unified "Continue with your phone number" screen for both login and signup, which also prevents account enumeration.
+Parse every number to E.164 with a maintained library, then run a carrier lookup to capture country, carrier, line type (mobile, landline, VoIP), and port status. Store these with the binding.
+
+Channel selection and fallback
+
+Default waterfall: WhatsApp (if the user has it and consents), then SMS, then voice. Let users pick a channel explicitly, and offer voice prominently for landlines and accessibility.
+Trigger the fallback on delivery-receipt failure or a timeout (roughly 20–30 seconds), never silently. Show "Send via SMS instead" and "Call me" options.
+Voice OTP should read digits slowly, repeat twice, and allow replay.
+
+OTP rules
+
+6 digits from a CSPRNG, valid 5 minutes, single use, stored only as a hash.
+Each code is bound to a challenge ID, device, and channel. Issuing a new challenge invalidates older ones.
+Maximum 5 verification attempts per challenge, then the challenge dies.
+Use origin-bound message formats (domain plus code) so browsers and phones can autofill and warn on phishing sites. Use platform autofill on Android and iOS, and one-tap/zero-tap autofill in WhatsApp authentication templates.
+Never put a clickable link in an OTP message.
+
+After verification
+
+Issue a short-lived access token and a rotating refresh token bound to the device.
+On first login, prompt to enroll a passkey and register the device as trusted. Later logins on that device use biometrics unlocking a device-bound key. The server never sees the biometric, and OTP becomes the fallback.
+
+Delivery resilience
+
+Contract with at least two SMS aggregators and route by per-country, per-carrier delivery rate. Monitor OTP conversion continuously, since it doubles as your fraud signal (section 5).
+2. Registration and recovery (no email anywhere)
+
+Registration
+
+Verify the number, then create the account with an opaque ID.
+Optional display name and a public handle. Other users see the handle, never the number.
+Enroll a passkey or device key.
+Generate a recovery kit of 8–10 single-use recovery codes, shown once with a prompt to store them offline.
+Prompt to add a second verified number or a trusted contact.
+
+Recovery tiers, in ascending friction:
+
+Scenario	Path
+Lost or replaced phone, same number	Standard OTP, plus step-up if SIM-swap signals fire
+Lost phone, has another logged-in device	Approve from the trusted device (biometric plus number-matching prompt)
+No access to phone or device	Recovery code, or passkey/hardware key
+Number permanently lost	Secondary verified number, or trusted-contact recovery (threshold, e.g. 2 of 3)
+Nothing else works	Identity verification (document plus liveness) followed by a 5–7 day waiting period
+
+Every recovery attempt triggers alerts on all remaining channels (push, in-app, all verified numbers). Anyone can cancel a pending recovery from a trusted device during the waiting period. Support agents get no bypass and must use the same tiers.
+
+Number change: requires proof of the old number (or a recovery tier if lost) plus OTP on the new number. Old sessions are revoked, and high-risk actions are locked for 48–72 hours.
+
+SIM swap detection
+
+Query carrier-backed signals where available (the CAMARA/GSMA Open Gateway SIM Swap API, or aggregator lookups). Coverage is uneven by country, so treat it as one signal among several.
+Also watch for a new device plus an OTP request, a carrier change since last verification, and a recent port.
+If a swap occurred within a configurable window (start at 72 hours), SMS or voice OTP alone no longer suffices. Require a trusted device, passkey, or recovery code, or impose a cooldown on sensitive actions.
+WhatsApp is not independent of the SIM, because re-registering WhatsApp on a new SIM typically needs an SMS code. Don't count it as a second factor against swap attacks.
+
+Portability and recycled numbers
+
+Snapshot the carrier at each verification. A carrier change triggers a re-lookup and counts as a soft risk signal, since port-out fraud is common.
+Carriers reassign disconnected numbers after a quarantine period that varies by country. Use a reassigned-number data source where one exists (the US has a Reassigned Numbers Database, for example).
+Dormancy policy: if an account has been inactive beyond a threshold (say 6 months), phone OTP alone yields a restricted session until an additional factor or trusted device confirms ownership. This protects old accounts from new owners of recycled numbers.
+3. Notification and communication infrastructure
+
+Architecture: event bus, then a consent and preference service, then a routing policy engine, then channel adapters (push, SMS, WhatsApp, in-app), then delivery-receipt webhooks feeding dedupe and escalation. The in-app inbox is the system of record for everything email used to carry. Other channels are pointers or mirrors, so a failed SMS never means lost information.
+
+Message type	Routing
+Security alerts	Push and in-app first, SMS as fallback, mirrored to every verified number for critical events (number change, recovery)
+Transactional (orders, status)	Push/in-app, WhatsApp utility template, SMS fallback
+Receipts, invoices, statements	Stored in inbox with a summary message; full document via in-app download or WhatsApp document message
+Marketing	WhatsApp marketing templates or SMS, strictly opt-in per channel
+Legal or policy notices	In-app with persistent banner and acknowledgment, SMS/push pointer (check jurisdiction requirements)
+
+WhatsApp Business API essentials
+
+Messages outside the 24-hour customer-service window must use pre-approved templates in the right category (authentication, utility, marketing).
+Users must opt in. Quality ratings and messaging limits apply, and pricing varies by category and country.
+Use a Business Solution Provider if you don't want to manage the integration yourself.
+
+SMS essentials
+
+Sender ID and template registration is mandatory in many countries. Start this early because approvals take weeks.
+Handle STOP/HELP keywords and watch encoding and segment costs.
+
+Security-message hygiene: avoid tokenized links in SMS. Say "open the app" instead, and use verified app links where a link is unavoidable. Every security alert should include a "This wasn't me" path that leads to session revocation and recovery lockdown.
+
+4. Profile and account management
+
+Data model (conceptual)
+
+Account: opaque ID, handle, status.
+PhoneBinding: E.164, country, carrier, line type, verified-at, last-verified-at, status (pending, active, suspended, released), and role flags (login, recovery, notifications).
+Credentials: passkeys, hardware keys, recovery-code set.
+Devices: device key, attestation status, last seen.
+
+Uniqueness: an active verified number binds to exactly one account, enforced at the database level. Pending claims expire, so nobody can squat on a number they haven't proven.
+
+Multiple numbers: allow up to about 3. One is primary, and the others can be login-enabled, recovery-only, or notification-only. Adding or removing numbers requires step-up. Removing the last login-capable number is blocked. Every change alerts all other numbers and devices.
+
+Collision policy: if someone verifies a number already bound to a dormant account, don't silently transfer it. Quarantine the old account, notify its trusted devices, and require the dormancy checks above before the new binding activates.
+
+Privacy in the UI: mask numbers (+91 ••••• ••321), let users share handles instead of numbers, and provide session/device management. Account deletion should be fully in-app and release the number binding after a grace period.
+
+Shared numbers: family or shared-device numbers are a real edge case. For consumer accounts, one number maps to one account. For business use, offer org accounts with admin-managed members.
+
+5. Security measures
+
+Rate limiting. Apply limits along several axes at once: per number (e.g. 3 sends per 10 minutes, 10 per day), per IP and ASN, per device fingerprint or attestation, per country prefix, and globally. Use escalating cooldowns (30s, 1m, 5m, 1h, 24h). Return identical responses for registered and unregistered numbers.
+
+SMS pumping and toll fraud. This is the biggest financial risk of an SMS-first system.
+
+Track send-to-verify conversion by destination prefix and carrier. Sudden drops on high-cost routes are the classic signature.
+Require device attestation (Play Integrity or App Attest) or a lightweight proof-of-work or CAPTCHA before sending on web.
+Set per-country spend caps and alerts, and launch with an allow-list of countries.
+Block or step up on sequential-number bursts, premium-rate ranges, and one device requesting many numbers.
+
+Suspicious number patterns. Feed a risk score with: VoIP or virtual line type, known disposable-number ranges, very recently activated lines, carrier or country mismatch with the device's locale, many accounts per device, and abuse reputation. The output is allow, step-up, or block.
+
+Cooldowns. Lock or limit withdrawals, payouts, and security-setting changes for 24–72 hours after recovery, number change, or a detected SIM swap.
+
+Backups when the phone is unavailable (dead battery, no roaming, lost handset):
+
+Passkeys (platform and synced), FIDO2 hardware keys, and trusted-device approval.
+Recovery codes, and optionally a TOTP authenticator app, which works offline and doesn't depend on the carrier.
+Wi-Fi calling and WhatsApp-over-data still work for OTP when cellular doesn't.
+
+Anti-phishing. OTPs can be relayed in real time by attackers, so passkeys are the actual defense. Use number-matching on device approvals, tell users in every OTP message never to share the code, and train support staff to never ask for one.
+
+Audit. Keep an immutable auth-event log with alerting on anomalies, with numbers masked in logs.
+
+6. Third-party integrations that expect email
+
+Some of this is unavoidable compatibility work at your system's edge. Keep it out of the user-facing surface.
+
+Pairwise pseudonymous identifiers. Build an identity-mapping service that mints a separate opaque ID per vendor (payments, CRM, support desk, analytics). This limits correlation and makes vendor offboarding clean.
+Proxy email addresses, where a vendor insists. Use random opaque local-parts on a domain you own, never anything derived from the phone number directly. Phone numbers have a small search space, so an unkeyed hash is trivially reversible. If a derivation is truly needed, use a keyed HMAC with the key in an HSM.
+Inbound bridge. Point proxy addresses at a mail-ingest service that routes vendor messages into the user's in-app inbox or WhatsApp. Users never see or manage an address, but be honest internally that this is still email at the boundary.
+Prefer vendors that let you suppress their own emails (send receipts and notices yourself) or that accept phone identifiers.
+You as an identity provider. Act as an OIDC provider with sub set to the opaque ID and the standard phone_number and phone_number_verified claims. Omit email, or supply a relay address for relying parties that require one. For SAML, use opaque or persistent NameID formats.
+Inbound social login. Don't accept Google or Apple as a login identifier. Accept it only as a temporary linking aid during migration.
+App stores. Phone-only auth is fine, but account deletion must be available in-app.
+Support. Use in-app chat and WhatsApp, keyed by account ID.
+
+Things that may not fully convert: vendor-mandated addresses, some enterprise procurement flows, and jurisdictions requiring specific written notices. Catalog these in your Phase 0 inventory (section 8).
+
+7. Privacy and compliance
+
+Why phone numbers are sensitive: they're persistent cross-context identifiers, often tied to real-world identity through SIM registration rules, and they can leak location and carrier data. Treat them as high-sensitivity personal data.
+
+Storage and handling
+
+Field-level encryption with envelope keys in a KMS/HSM, held in a separate PII vault. Other services see only account IDs.
+Use a blind index (HMAC with a separate key) for uniqueness checks and lookups without decrypting.
+Never log full numbers or OTPs. Scrub logs, and make sure backups and deletion propagate.
+Rotate keys and log all access to the vault.
+
+Consent and purpose limitation
+
+Separate consent for authentication (contract necessity) from marketing (explicit opt-in per channel).
+Never repurpose security-collected numbers for advertising. Regulators have fined companies for exactly this.
+Get consent or establish a lawful basis before carrier lookups and SIM-swap queries, and limit how long you retain the results.
+
+Regional telecom and privacy rules (verify current requirements with counsel and local telecom advisers, since these change often):
+
+US: TCPA consent and opt-out handling, A2P 10DLC brand and campaign registration.
+EU/UK: GDPR, ePrivacy/PECR for marketing messages.
+India: TRAI DLT registration of entity, sender headers, and templates, plus the DPDP Act.
+Elsewhere: sender ID registries in places like Singapore and the Gulf states, real-name and template rules in China, and LGPD in Brazil.
+Data localization: some markets restrict cross-border transfers, so check where your SMS and lookup providers process data.
+
+Rights and notices: run access, export, and deletion requests in-app, authenticated with phone OTP plus step-up. Check whether breach-notification law in each jurisdiction accepts SMS or in-app notice. Some require written or mailed notice.
+
+Inclusion: some people can't hold a number (minors, displaced people, some travelers) or can't use SMS (deaf or hard-of-hearing users on voice-only flows). Build accessible alternatives such as voice, on-screen codes for trusted-device login, and a passkey-only path where policy allows. Handle minors' consent per local age thresholds.
+
+8. Migration for existing email-based users
+
+Phase 0: Prepare (4–8 weeks). Inventory every email dependency: login, notifications, receipts, support, marketing, analytics, admin tools, fraud rules, dedupe logic, vendor integrations. Start sender ID and WhatsApp template registrations now, since lead times are long. Build and load-test the phone stack in shadow mode.
+
+Phase 1: Link (opt-in). Prompt existing users to add and verify a phone number, authenticated via their current email credentials. The phone becomes an additional login method, and passwords retire on linking. Handle collisions deliberately:
+
+Number already bound to another account: offer merge, or ask the user to choose which account keeps it.
+Shared family or team numbers: guide users to add a different number, or convert to an org account.
+Landlines: route through voice OTP.
+
+Phase 2: Phone-first. New signups are phone-only. Route notifications to phone channels for linked users while temporarily dual-sending to email. Show in-app banners with a clear timeline.
+
+Phase 3: Deprecate (90–180 day window). Email login is disabled for linked users. Unlinked users hit a linking gate at next login, verified by email one last time. There's an unavoidable irony here: the deprecation notices themselves must go out by email, because it's the only channel that reaches unlinked users. Plan a small, final set of emails and treat them as a migration tool, not a contradiction.
+
+Phase 4: Sunset.
+
+Purge email addresses from your database, CRM, ESP, analytics, and backups (subject to legal holds).
+Keep an extended "claim legacy account" path (e.g. 12 months) via a support flow with identity verification.
+Decommission the email-sending infrastructure, except the inbound bridge from section 6 if you keep it.
+
+Rollout mechanics
+
+Cohort by percentage (1%, 5%, 25%, 100%), and keep a kill switch that temporarily re-enables email login.
+Track: linking funnel drop-off, OTP delivery success by country and carrier, login success rate, account-takeover rate, support-ticket volume, cost per authentication, and churn by cohort.
+Define rollback criteria upfront, such as delivery rate dropping below a threshold in a key market.
+
+Special cases: B2B customers whose admins expect email may need a grandfathered path or SCIM provisioning. Users abroad on foreign SIMs or travel eSIMs are why multiple numbers matter.
+
+Key risks and open decisions
+SMS cost and pumping fraud. Budget for it, and use passkeys to reduce OTP volume over time.
+SIM-swap and recycled-number takeover. Carrier signals, dormancy rules, and cooldowns are essential, not optional.
+Recovery is the real security perimeter. Whatever your weakest recovery tier is, that's your account security.
+Coverage gaps: legal notices, vendor edges, and users who can't use a phone. Decide upfront which exceptions you'll accept.
+Country launch list. Delivery quality, regulation, and fraud exposure vary enormously, so expand market by market.

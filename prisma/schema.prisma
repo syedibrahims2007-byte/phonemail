@@ -1,0 +1,754 @@
+// Prisma Schema for PhoneMail - Phone-Number-Based Authentication System
+// Based on: Phone-Number-Based Authentication System: Implementation Guidance
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// CORE ACCOUNT & IDENTITY MODELS
+// ============================================================
+
+model Account {
+  id            String   @id @default(uuid()) // Opaque immutable ID
+  handle        String?  @unique // Public handle, never the phone number
+  displayName   String?
+  status        AccountStatus @default(ACTIVE)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastActiveAt  DateTime?
+  metadata      Json?    // For cooldowns, settings, etc.
+
+  // Relations
+  phoneBindings    PhoneBinding[]
+  credentials      Credential[]
+  devices          Device[]
+  sessions         Session[]
+  recoveryCodes    RecoveryCode[]
+  trustedContacts  TrustedContact[]
+  inboxMessages    InboxMessage[]
+  auditLogs        AuditLog[]
+  consents         Consent[]
+  proxyEmails      ProxyEmail[]
+  recoveryAttempts RecoveryAttempt[]
+  whatsAppSessions WhatsAppSession[]
+  vendorMappings   VendorMapping[]
+  smsThreads       SmsThread[]
+
+  @@index([status])
+  @@index([handle])
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DORMANT
+  QUARANTINED
+  DELETED
+}
+
+// Phone number binding - verified, revocable attachment to account
+model PhoneBinding {
+  id                String         @id @default(uuid())
+  accountId         String
+  account           Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  otpChallenges     OtpChallenge[]
+  whatsAppSessions  WhatsAppSession[]
+  simSwapSignals    SimSwapSignal[]
+  e164Hash          String         @unique // Blind index (HMAC) for lookups without decrypting
+  e164Encrypted     String         // Field-level encrypted E.164 number
+  country           String         // ISO country code
+  carrier           String?
+  lineType          LineType       @default(UNKNOWN)
+  portStatus        String?        // ported, porting, none
+  verifiedAt        DateTime?
+  lastVerifiedAt    DateTime?
+  status            BindingStatus  @default(PENDING)
+  roleFlags         RoleFlag[]     @default([LOGIN]) // Array of roles: LOGIN, RECOVERY, NOTIFICATIONS
+  isPrimary         Boolean        @default(false)
+  carrierSnapshot   Json?          // Full carrier lookup result at verification
+  simSwapCheckedAt  DateTime?
+  simSwapRiskScore  Int?           // 0-100 risk score
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([accountId])
+  @@index([status])
+  @@index([e164Hash])
+}
+
+enum LineType {
+  MOBILE
+  LANDLINE
+  VOIP
+  UNKNOWN
+}
+
+enum BindingStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  RELEASED
+}
+
+enum RoleFlag {
+  LOGIN
+  RECOVERY
+  NOTIFICATIONS
+}
+
+// ============================================================
+// CREDENTIALS & DEVICE TRUST
+// ============================================================
+
+model Credential {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type          CredentialType
+  publicKey     String   // For passkeys/FIDO2: credential public key
+  credentialId  String?  @unique // For passkeys: credential ID
+  attestation   Json?    // Attestation object for verification
+  aaguid        String?  // Authenticator AAGUID
+  signCount     Int      @default(0) // For cloned credential detection
+  name          String?  // User-friendly name (e.g., "iPhone 15", "YubiKey")
+  lastUsedAt    DateTime?
+  createdAt     DateTime @default(now())
+  revokedAt     DateTime?
+
+  @@index([accountId])
+  @@index([credentialId])
+  @@index([type])
+}
+
+enum CredentialType {
+  PASSKEY
+  FIDO2_HARDWARE_KEY
+  RECOVERY_CODE
+  TOTP
+  DEVICE_KEY
+}
+
+model Device {
+  id              String    @id @default(uuid())
+  accountId       String
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  sessions        Session[]
+  deviceKey       String    @unique // Public key for device-bound authentication
+  deviceKeyHash   String    @unique // Hash for lookup
+  attestationType AttestationType?
+  attestationData Json?
+  platform        String?   // iOS, Android, Web, etc.
+  platformVersion String?
+  appVersion      String?
+  name            String?   // User-friendly name
+  isTrusted       Boolean   @default(false)
+  trustLevel      TrustLevel @default(UNVERIFIED)
+  lastSeenAt      DateTime?
+  lastSeenIp      String?
+  pushToken       String?
+  pushTokenType   String?   // 'fcm' | 'webpush'
+  createdAt       DateTime  @default(now())
+  revokedAt       DateTime?
+
+  @@index([accountId])
+  @@index([deviceKeyHash])
+  @@index([isTrusted])
+}
+
+enum AttestationType {
+  NONE
+  APPLE_APP_ATTEST
+  GOOGLE_PLAY_INTEGRITY
+  FIDO2
+}
+
+enum TrustLevel {
+  UNVERIFIED
+  VERIFIED
+  TRUSTED
+  HIGH_TRUST
+}
+
+// ============================================================
+// SESSIONS & TOKENS
+// ============================================================
+
+model Session {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deviceId      String?
+  device        Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  accessTokenHash   String   @unique // Hash of access token
+  refreshTokenHash  String   @unique // Hash of refresh token
+  expiresAt     DateTime
+  refreshExpiresAt DateTime
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime @default(now())
+  lastUsedAt    DateTime @default(now())
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@index([accountId])
+  @@index([deviceId])
+  @@index([expiresAt])
+  @@index([refreshTokenHash])
+}
+
+// ============================================================
+// OTP & CHALLENGE MANAGEMENT
+// ============================================================
+
+model OtpChallenge {
+  id                  String   @id @default(uuid())
+  phoneBindingId      String?  // Null for pre-registration challenges
+  phoneBinding        PhoneBinding? @relation(fields: [phoneBindingId], references: [id], onDelete: SetNull)
+  e164Hash            String   // Blind index for phone lookup
+  channel             OtpChannel
+  hash                String   // HMAC-SHA256 of (challengeId:otp)
+  attempts            Int      @default(0)
+  maxAttempts         Int      @default(5)
+  deviceId            String?  // Device fingerprint/binding
+  deviceFingerprint   String?
+  ipAddress           String?
+  countryPrefix       String?
+  status              ChallengeStatus @default(PENDING)
+  expiresAt           DateTime
+  verifiedAt          DateTime?
+  createdAt           DateTime @default(now())
+  metadata            Json?    // For call SID, etc.
+
+  @@index([e164Hash])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([phoneBindingId])
+}
+
+enum OtpChannel {
+  SMS
+  VOICE
+  WHATSAPP
+  PUSH
+}
+
+enum ChallengeStatus {
+  PENDING
+  DELIVERED
+  VERIFIED
+  EXPIRED
+  FAILED
+  REVOKED
+}
+
+// ============================================================
+// RECOVERY SYSTEM
+// ============================================================
+
+model RecoveryCode {
+  id          String   @id @default(uuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  codeHash    String   // Hashed recovery code
+  usedAt      DateTime?
+  createdAt   DateTime @default(now())
+  batchId     String   // Group codes generated together
+
+  @@index([accountId])
+  @@index([batchId])
+}
+
+model RecoveryAttempt {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tier          RecoveryTier
+  trigger       String   // What triggered: SIM_SWAP, LOST_PHONE, NUMBER_CHANGE, etc.
+  status        RecoveryStatus @default(INITIATED)
+  initiatedAt   DateTime @default(now())
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  cancelledBy   String?  // Device ID or 'admin'
+  waitingUntil  DateTime? // For high-friction tiers
+  metadata      Json?    // Additional context
+  @@index([accountId])
+  @@index([status])
+  @@index([initiatedAt])
+}
+
+enum RecoveryTier {
+  SAME_NUMBER_OTP           // Lost/replaced phone, same number
+  TRUSTED_DEVICE_APPROVAL   // Has another logged-in device
+  RECOVERY_CODE             // Recovery code or passkey/hardware key
+  SECONDARY_NUMBER          // Secondary verified number
+  TRUSTED_CONTACT           // Threshold (e.g., 2 of 3) trusted contacts
+  IDENTITY_VERIFICATION     // Document + liveness + waiting period
+}
+
+enum RecoveryStatus {
+  INITIATED
+  PENDING_APPROVAL
+  WAITING_PERIOD
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+model TrustedContact {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contactAccountId String // The trusted contact's account ID
+  contactName   String?
+  contactHandle String?
+  addedAt       DateTime @default(now())
+  confirmedAt   DateTime?
+  threshold     Int      @default(1) // For threshold recovery (e.g., 2 of 3)
+
+  @@unique([accountId, contactAccountId])
+  @@index([accountId])
+  @@index([contactAccountId])
+}
+
+// ============================================================
+// NOTIFICATION & COMMUNICATION INFRASTRUCTURE
+// ============================================================
+
+model InboxMessage {
+  id              String              @id @default(uuid())
+  accountId       String
+  account         Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deliveries      NotificationDelivery[]
+  type            MessageType
+  category        MessageCategory
+  subject         String
+  body            String              // Short summary/preview
+  payload         Json?               // Full content, attachments, deep links
+  priority        Priority            @default(NORMAL)
+  status          MessageStatus       @default(UNREAD)
+  readAt          DateTime?
+  acknowledgedAt  DateTime?           // For legal/policy notices
+  sourceId        String?             // External reference (order ID, invoice ID, etc.)
+  sourceType      String?             // 'order', 'invoice', 'security', 'marketing', etc.
+  createdAt       DateTime            @default(now())
+  expiresAt       DateTime?           // For auto-cleanup
+
+  @@index([accountId, status])
+  @@index([accountId, category])
+  @@index([accountId, createdAt])
+  @@index([sourceId, sourceType])
+}
+
+enum MessageType {
+  SECURITY_ALERT
+  TRANSACTIONAL
+  RECEIPT_INVOICE
+  MARKETING
+  LEGAL_NOTICE
+  SYSTEM
+}
+
+enum MessageCategory {
+  AUTH
+  SECURITY
+  TRANSACTION
+  BILLING
+  MARKETING
+  LEGAL
+  SYSTEM
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum MessageStatus {
+  UNREAD
+  READ
+  ARCHIVED
+  DELETED
+}
+
+// Delivery tracking for all channels
+model NotificationDelivery {
+  id            String   @id @default(uuid())
+  messageId     String
+  message       InboxMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  channel       DeliveryChannel
+  recipient     String   // Phone, push token, email, etc.
+  provider      String   // twilio, firebase, whatsapp, etc.
+  providerId    String?  // Provider's message ID
+  status        DeliveryStatus @default(QUEUED)
+  sentAt        DateTime?
+  deliveredAt   DateTime?
+  failedAt      DateTime?
+  error         String?
+  cost          Decimal? @db.Decimal(10, 4)
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([messageId])
+  @@index([channel, status])
+  @@index([providerId])
+}
+
+enum DeliveryChannel {
+  IN_APP
+  PUSH
+  SMS
+  WHATSAPP
+  VOICE
+  EMAIL_PROXY
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  BOUNCED
+  OPT_OUT
+}
+
+// User consent and preferences
+model Consent {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  purpose       ConsentPurpose
+  channel       DeliveryChannel?
+  granted       Boolean  @default(false)
+  grantedAt     DateTime?
+  revokedAt     DateTime?
+  ipAddress     String?
+  userAgent     String?
+  version       String   // Consent version for compliance
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([accountId, purpose, channel])
+  @@index([accountId])
+}
+
+enum ConsentPurpose {
+  AUTHENTICATION
+  SECURITY_ALERTS
+  TRANSACTIONAL
+  MARKETING
+  LEGAL_NOTICES
+  ANALYTICS
+  CARRIER_LOOKUP
+  SIM_SWAP_CHECK
+}
+
+// ============================================================
+// WHATSAPP BUSINESS INTEGRATION
+// ============================================================
+
+model WhatsAppTemplate {
+  id            String   @id @default(uuid())
+  name          String   @unique // Template name as registered
+  category      WhatsAppCategory
+  language      String   @default("en_US")
+  header        String?  // Text, image, video, document, location
+  body          String   // Template body with {{1}}, {{2}} placeholders
+  footer        String?
+  buttons       Json?    // Quick reply or CTA buttons
+  status        TemplateStatus @default(PENDING)
+  providerId    String?  // Provider's template ID
+  approvedAt    DateTime?
+  rejectedAt    DateTime?
+  rejectionReason String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([category])
+  @@index([status])
+}
+
+enum WhatsAppCategory {
+  AUTHENTICATION
+  UTILITY
+  MARKETING
+}
+
+enum TemplateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  DISABLED
+}
+
+model WhatsAppSession {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  phoneBindingId String
+  phoneBinding  PhoneBinding @relation(fields: [phoneBindingId], references: [id], onDelete: Cascade)
+  sessionId     String   @unique // WhatsApp session ID
+  status        SessionStatus @default(ACTIVE)
+  expiresAt     DateTime // 24-hour customer service window
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([accountId])
+  @@unique([phoneBindingId])
+  @@index([sessionId])
+}
+
+enum SessionStatus {
+  ACTIVE
+  EXPIRED
+  ENDED
+}
+
+// ============================================================
+// THIRD-PARTY INTEGRATIONS (Proxy emails, OIDC, etc.)
+// ============================================================
+
+model ProxyEmail {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  localPart     String   // Random opaque local part
+  domain        String   // Our owned domain
+  vendor        String   // Which vendor/service this is for
+  vendorId      String?  // Vendor's identifier for this mapping
+  isActive      Boolean  @default(true)
+  lastUsedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  @@unique([localPart, domain])
+  @@index([accountId])
+  @@index([vendor])
+}
+
+model VendorMapping {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  vendor        String   // Vendor identifier
+  vendorSub     String   // Pairwise pseudonymous identifier (sub claim)
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([accountId, vendor])
+  @@unique([vendor, vendorSub])
+  @@index([accountId])
+}
+
+// ============================================================
+// SECURITY & AUDIT
+// ============================================================
+
+model AuditLog {
+  id            String   @id @default(uuid())
+  accountId     String?
+  account       Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  eventType     AuditEventType
+  severity      AuditSeverity @default(INFO)
+  description   String
+  ipAddress     String?
+  userAgent     String?
+  deviceId      String?
+  metadata      Json?    // Structured event data (numbers masked)
+  createdAt     DateTime @default(now())
+
+  @@index([accountId])
+  @@index([eventType])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+enum AuditEventType {
+  LOGIN_ATTEMPT
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  OTP_REQUESTED
+  OTP_VERIFIED
+  OTP_FAILED
+  REGISTRATION
+  NUMBER_ADDED
+  NUMBER_CHANGED
+  NUMBER_REMOVED
+  PASSKEY_ENROLLED
+  PASSKEY_REVOKED
+  DEVICE_TRUSTED
+  DEVICE_REVOKED
+  RECOVERY_INITIATED
+  RECOVERY_COMPLETED
+  RECOVERY_CANCELLED
+  SIM_SWAP_DETECTED
+  SESSION_REVOKED
+  SETTINGS_CHANGED
+  CONSENT_CHANGED
+  DATA_EXPORT
+  DATA_DELETION
+  SUSPICIOUS_ACTIVITY
+  RATE_LIMIT_HIT
+  SMS_PUMPING_DETECTED
+  RECOVERY_CODE_GENERATED
+  RECOVERY_CODE_USED
+}
+
+enum AuditSeverity {
+  DEBUG
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+// SIM Swap signals
+model SimSwapSignal {
+  id            String   @id @default(uuid())
+  phoneBindingId String
+  phoneBinding  PhoneBinding @relation(fields: [phoneBindingId], references: [id], onDelete: Cascade)
+  source        SignalSource
+  signal        SimSwapSignalType
+  confidence    Int      // 0-100
+  details       Json?
+  detectedAt    DateTime @default(now())
+  actedUpon     Boolean  @default(false)
+
+  @@index([phoneBindingId])
+  @@index([detectedAt])
+}
+
+enum SignalSource {
+  CARRIER_API      // CAMARA/GSMA Open Gateway
+  AGGREGATOR_LOOKUP // Twilio, etc.
+  HEURISTIC        // New device + OTP, carrier change, recent port
+  INTERNAL         // Our own analysis
+}
+
+enum SimSwapSignalType {
+  SIM_SWAP_DETECTED
+  CARRIER_CHANGE
+  RECENT_PORT
+  NEW_DEVICE_OTP
+  MULTIPLE_ACCOUNTS_DEVICE
+  VOIP_DISPOSABLE
+  RISK_SCORE_HIGH
+}
+
+// Rate limiting tracking
+model RateLimitBucket {
+  id            String   @id @default(uuid())
+  key           String   @unique // Composite: type:identifier:window
+  count         Int      @default(0)
+  windowStart   DateTime @default(now())
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+// Country/prefix allowlist for launch
+model CountryConfig {
+  id            String   @id @default(uuid())
+  countryCode   String   @unique // ISO 3166-1 alpha-2
+  countryName   String
+  isEnabled     Boolean  @default(false)
+  dailySpendCap Decimal? @db.Decimal(10, 2)
+  monthlySpendCap Decimal? @db.Decimal(10, 2)
+  requiresSenderIdRegistration Boolean @default(false)
+  requiresDltRegistration Boolean @default(false) // India TRAI DLT
+  defaultLanguage String @default("en")
+  timezone      String
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// SMS Pumping / Toll Fraud tracking
+model SmsConversionMetric {
+  id            String   @id @default(uuid())
+  countryPrefix String   // e.g., "+1", "+91"
+  carrier       String?
+  date          DateTime @db.Date
+  sendsCount    Int      @default(0)
+  verifiesCount Int      @default(0)
+  conversionRate Float   // verifies/sends
+  cost          Decimal  @db.Decimal(10, 4)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([countryPrefix, carrier, date])
+  @@index([date])
+  @@index([conversionRate])
+}
+
+// ============================================================
+// SMS / TEXT MESSAGING
+// ============================================================
+
+// A conversation between an account and one phone number. The peer is stored
+// the same way a linked number is - blind index for lookup, encrypted at rest
+// for display - so a thread list never leaks plaintext numbers to the database
+// or to a log line.
+model SmsThread {
+  id            String   @id @default(uuid())
+  accountId     String
+  account       Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  peerHash      String   // Blind index (HMAC) of the other party's E.164
+  peerEncrypted String   // Field-level encrypted E.164 of the other party
+  peerBindingId String?  // Set when the peer is one of our own verified numbers
+  label         String?  // User-assigned nickname
+  lastMessageAt DateTime @default(now())
+  lastPreview   String?  // Denormalised snippet so the list needs no join
+  unreadCount   Int      @default(0)
+  archivedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  messages      SmsMessage[]
+
+  @@unique([accountId, peerHash])
+  @@index([accountId, lastMessageAt])
+  @@index([accountId, unreadCount])
+}
+
+enum SmsDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum SmsStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model SmsMessage {
+  id          String      @id @default(uuid())
+  threadId    String
+  thread      SmsThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  direction   SmsDirection
+  body        String
+  status      SmsStatus   @default(QUEUED)
+  providerSid String?     @unique
+  error       String?
+  segments    Int?
+  createdAt   DateTime    @default(now())
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  failedAt    DateTime?
+  readAt      DateTime?
+
+  @@index([threadId, createdAt])
+  @@index([status])
+  @@index([providerSid])
+}

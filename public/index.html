@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>PhoneMail</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="PhoneMail">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#128231;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">Phone<span>Mail</span></div>
+    <div class="spacer"></div>
+    <div class="pill" id="session-pill" hidden></div>
+    <div class="pill" id="live-pill" hidden><span class="dotpulse"></span>live</div>
+    <span class="who" id="who"></span>
+    <button class="icon ghost" id="btn-theme" title="Toggle light / dark theme  (t)" aria-label="Toggle theme">&#9789;</button>
+    <button class="sm ghost" id="btn-install" hidden title="Install PhoneMail as an app">Install</button>
+    <a href="/api" title="API reference" class="small">API</a>
+    <button class="sm ghost" id="btn-logout" hidden>Sign out</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+<!-- ============================================================
+     AUTH
+     ============================================================ -->
+<section id="view-auth" hidden>
+  <div class="card">
+    <div class="steps">
+      <div class="step" id="st1">1 &middot; Phone</div>
+      <div class="step" id="st2">2 &middot; Code</div>
+      <div class="step" id="st3">3 &middot; Profile</div>
+    </div>
+
+    <!-- step 1 : phone -->
+    <div id="p-phone">
+      <h2>Sign in or create an account</h2>
+      <p class="sub">Enter your phone number and we'll text you a one-time code.</p>
+
+      <label for="in-phone">Phone number (E.164)</label>
+      <div class="row top">
+        <div class="grow">
+          <input id="in-phone" class="mono" type="tel" placeholder="+14155550100" autocomplete="tel" spellcheck="false">
+        </div>
+        <button class="primary" id="btn-start">Send code</button>
+      </div>
+
+      <label for="sel-channel" style="margin-top:16px">Delivery channel</label>
+      <select id="sel-channel" style="max-width:220px">
+        <option value="SMS">SMS &mdash; text message</option>
+        <option value="VOICE">Voice call &mdash; spoken code</option>
+      </select>
+
+      <div class="note">
+        <b>Dev mode</b> &mdash; no message is actually sent. The code is printed to
+        <code>server.log</code> and, when available, shown right here.
+      </div>
+    </div>
+
+    <!-- step 2 : otp -->
+    <div id="p-otp" hidden>
+      <h2>Enter your code</h2>
+      <p class="sub">
+        Sent to <b id="otp-phone" class="mono"></b> via <span id="otp-channel">SMS</span>
+        &middot; <span id="otp-timer">expires in 5:00</span>
+      </p>
+
+      <label for="in-otp">6-digit code</label>
+      <div class="row top">
+        <div class="grow">
+          <input id="in-otp" class="mono" type="text" inputmode="numeric" maxlength="6"
+                 placeholder="000000" autocomplete="one-time-code" spellcheck="false"
+                 style="letter-spacing:.4em;font-size:19px;text-align:center">
+        </div>
+        <button class="primary" id="btn-verify">Verify</button>
+        <button class="ghost" id="btn-back1">Back</button>
+      </div>
+
+      <div id="dev-otp" class="dev-otp" hidden>
+        <span class="lbl">Dev code</span>
+        <span class="val" id="dev-otp-val">------</span>
+        <span class="hint">
+          <code>FORCE_DEV_MODE</code> is on, so nothing was texted &mdash; the server
+          also logged this to <code>server.log</code>.
+        </span>
+      </div>
+
+      <!-- step-up gate -->
+      <div id="stepup" hidden>
+        <div class="note bad" style="margin-top:18px">
+          <b>Extra verification required.</b>
+          We detected signs your number may have changed hands, so a one-time code
+          isn't enough on its own.
+        </div>
+        <label for="in-stepup">Recovery code</label>
+        <div class="row top">
+          <div class="grow">
+            <input id="in-stepup" class="mono" type="text" placeholder="XXXXXXXX"
+                   spellcheck="false" style="letter-spacing:.15em;text-transform:uppercase">
+          </div>
+          <button class="primary" id="btn-stepup">Confirm</button>
+        </div>
+        <p class="sub" style="margin-top:9px">
+          One of the 10 recovery codes you saved when you signed up.
+          <button class="sm ghost" id="btn-stepup-skip" style="margin-left:6px">Use a different code</button>
+        </p>
+      </div>
+
+      <div class="row" style="margin-top:18px">
+        <button class="ghost" id="btn-resend">Send a new code</button>
+        <span class="small muted" id="resend-note"></span>
+      </div>
+    </div>
+
+    <!-- step 3 : profile -->
+    <div id="p-reg" hidden>
+      <h2>Create your account</h2>
+      <p class="sub">Number verified &mdash; pick a handle to finish.</p>
+
+      <label for="in-handle">Handle</label>
+      <input id="in-handle" type="text" placeholder="alice" maxlength="30" autocomplete="username" spellcheck="false">
+      <p class="small muted" style="margin:6px 0 0">Lowercase letters, numbers and underscores. This is how people will find you.</p>
+
+      <label for="in-name">Display name</label>
+      <input id="in-name" type="text" placeholder="Alice" maxlength="60" autocomplete="name">
+
+      <div class="row" style="margin-top:22px">
+        <button class="primary" id="btn-register">Create account</button>
+        <button class="ghost" id="btn-back2">Back</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     APP
+     ============================================================ -->
+<section id="view-app" hidden>
+
+  <!-- fresh recovery codes -->
+  <div class="banner" id="rc-banner" hidden>
+    <h3>Save your recovery codes</h3>
+    <p>There are <b>10 codes</b> and each one works exactly once. They're the only way
+       back into this account if you lose your phone &mdash; we store them hashed, so
+       this is the last time you'll ever see them.</p>
+    <div class="codes" id="rc-codes"></div>
+    <div class="acts">
+      <button class="sm" id="btn-copy-codes">Copy all</button>
+      <button class="sm ghost" id="btn-dismiss-rc">I've saved them</button>
+    </div>
+  </div>
+
+  <!-- second-factor warning -->
+  <div class="banner crit" id="factor-banner" hidden>
+    <h3>You have no recovery codes left</h3>
+    <p>If you lose your phone you will not be able to sign back in. Generate a fresh
+       set now &mdash; it only takes a moment.</p>
+    <div class="acts">
+      <button class="sm" id="btn-banner-codes">Generate new codes</button>
+      <button class="sm ghost" data-goto="security">Go to security</button>
+    </div>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-tab="inbox">Inbox <span class="count" id="unread-badge" hidden></span></button>
+    <button class="tab" data-tab="text">Text <span class="count" id="text-unread-badge" hidden></span></button>
+    <button class="tab" data-tab="account">Account</button>
+    <button class="tab" data-tab="security">Security</button>
+  </nav>
+
+  <!-- ------------------------------ INBOX ------------------------------ -->
+  <div id="tab-inbox">
+    <div class="toolbar">
+      <input type="search" id="f-search" placeholder="Search subject or text&hellip;" aria-label="Search messages" spellcheck="false">
+      <select id="f-status" aria-label="Filter by status">
+        <option value="">All messages</option>
+        <option value="UNREAD">Unread</option>
+        <option value="READ">Read</option>
+        <option value="ARCHIVED">Archived</option>
+      </select>
+      <select id="f-category" aria-label="Filter by category">
+        <option value="">All categories</option>
+      </select>
+      <button class="sm" id="btn-select-all" title="Select every loaded message">Select all</button>
+      <div class="spacer"></div>
+      <button class="sm" id="btn-refresh" title="Refresh  (r)">Refresh</button>
+      <button class="sm" id="btn-test-msg">Send test message</button>
+    </div>
+
+    <div class="bulkbar" id="bulkbar" hidden>
+      <span id="bulk-count">0 selected</span>
+      <div class="spacer"></div>
+      <button class="sm" id="btn-bulk-read">Mark read</button>
+      <button class="sm" id="btn-bulk-archive">Archive</button>
+      <button class="sm danger" id="btn-bulk-delete">Delete</button>
+      <button class="sm ghost" id="btn-bulk-clear">Clear</button>
+    </div>
+
+    <div id="msg-list"></div>
+    <div class="load-more" id="msg-more" hidden>
+      <button class="sm" id="btn-load-more">Load more</button>
+    </div>
+  </div>
+
+  <!-- ------------------------------ TEXT ------------------------------- -->
+  <div id="tab-text" hidden>
+    <div class="sms" id="sms-layout">
+
+      <aside class="sms-list">
+        <div class="sms-list-head">
+          <div class="row">
+            <div class="grow">
+              <input type="search" id="f-thread" placeholder="Search conversations" aria-label="Search conversations" spellcheck="false">
+            </div>
+            <button class="sm primary" id="btn-new-thread" title="Start a new conversation">New</button>
+          </div>
+        </div>
+        <div class="sms-scroll" id="sms-threads"></div>
+      </aside>
+
+      <section class="sms-view" id="sms-view">
+        <div class="ghostline" id="sms-placeholder">
+          Pick a conversation, or start a new one.
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ----------------------------- ACCOUNT ----------------------------- -->
+  <div id="tab-account" hidden>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Profile</h2>
+          <p class="sub" style="margin:0">Your public identity and account state.</p>
+        </div>
+      </div>
+      <dl class="kv" id="kv-profile"></dl>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Phone numbers</h2>
+          <p class="sub" style="margin:0">Numbers that can sign you in, receive alerts, and recover the account.</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="sm" id="btn-add-phone">Add number</button>
+      </div>
+      <div id="add-phone" hidden>
+        <div class="note info">
+          <div class="row top">
+            <div class="grow">
+              <input id="in-newphone" class="mono" type="tel" placeholder="+14155550199" spellcheck="false">
+            </div>
+            <button class="primary" id="btn-add-phone-go">Send code</button>
+            <button class="ghost" id="btn-add-phone-cancel">Cancel</button>
+          </div>
+          <div class="checks" style="margin-top:12px">
+            <label class="check"><input type="checkbox" data-role="LOGIN" checked> Can sign in</label>
+            <label class="check"><input type="checkbox" data-role="RECOVERY" checked> Can recover</label>
+            <label class="check"><input type="checkbox" data-role="NOTIFICATIONS" checked> Gets alerts</label>
+          </div>
+        </div>
+        <div id="add-phone-otp" hidden style="margin-top:16px">
+          <label for="in-newphone-otp">Code sent to the new number</label>
+          <div class="row top">
+            <div class="grow">
+              <input id="in-newphone-otp" class="mono" type="text" inputmode="numeric" maxlength="6"
+                     placeholder="000000" style="letter-spacing:.4em;text-align:center;font-size:18px">
+            </div>
+            <button class="primary" id="btn-add-phone-verify">Verify &amp; add</button>
+          </div>
+        </div>
+      </div>
+      <div id="phone-list" style="margin-top:16px"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Devices</h2>
+          <p class="sub" style="margin:0">Browsers and apps with an account session. Trusting one lets it satisfy step-up checks.</p>
+        </div>
+      </div>
+      <div id="device-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Passkeys</h2>
+          <p class="sub" style="margin:0">WebAuthn credentials registered to this account.</p>
+        </div>
+      </div>
+      <div id="passkey-list"></div>
+    </div>
+
+  </div>
+
+  <!-- ----------------------------- SECURITY ----------------------------- -->
+  <div id="tab-security" hidden>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Recovery codes</h2>
+          <p class="sub" style="margin:0">Single-use codes that get you back in if your phone is gone.</p>
+        </div>
+        <div class="spacer"></div>
+        <span class="badge blue" id="rc-remaining">&mdash;</span>
+        <button class="sm" id="btn-new-codes">Generate new set</button>
+      </div>
+      <p class="sub" style="margin:12px 0 0">
+        Generating a new set adds 10 more codes. Old unused codes stay valid.
+        Test a code to check it works &mdash; doing so <b>uses it up</b>.
+      </p>
+      <div class="row" style="margin-top:14px;max-width:420px">
+        <input id="in-verify-code" class="mono" type="text" placeholder="XXXXXXXX"
+               spellcheck="false" style="letter-spacing:.15em;text-transform:uppercase">
+        <button id="btn-verify-code">Test code</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Sessions</h2>
+          <p class="sub" style="margin:0">Every sign-in creates a session. Revoking all of them signs out everywhere, including here.</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="sm danger" id="btn-revoke-all">Revoke all sessions</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Account recovery</h2>
+          <p class="sub" style="margin:0">Tiered flows for regaining access when normal sign-in fails.</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="sm" id="btn-refresh-recovery">Refresh</button>
+      </div>
+      <div id="recovery-status"></div>
+      <hr class="divider">
+      <p class="section-title">Start a recovery attempt</p>
+      <div class="row">
+        <select id="sel-tier" style="max-width:280px">
+          <option value="SAME_NUMBER_OTP">Same number &mdash; OTP on the existing line</option>
+          <option value="RECOVERY_CODE">Recovery code</option>
+          <option value="TRUSTED_DEVICE_APPROVAL">Trusted device approval</option>
+          <option value="SECONDARY_NUMBER">Secondary verified number</option>
+          <option value="TRUSTED_CONTACT">Trusted contacts (threshold)</option>
+          <option value="IDENTITY_VERIFICATION">Identity verification</option>
+        </select>
+        <button id="btn-initiate-recovery">Initiate</button>
+      </div>
+      <p class="sub" id="recovery-result" style="margin-top:11px"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Trusted contacts</h2>
+          <p class="sub" style="margin:0">Other PhoneMail accounts that can vouch for you during recovery.</p>
+        </div>
+      </div>
+      <div class="row" style="max-width:420px">
+        <input id="in-contact" placeholder="their handle" spellcheck="false">
+        <button id="btn-add-contact">Add</button>
+      </div>
+      <div id="contact-list" style="margin-top:16px"></div>
+    </div>
+
+  </div>
+
+</section>
+
+<p class="footnote">
+  <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> switch tabs &middot; <kbd>/</kbd> search inbox &middot;
+  <kbd>r</kbd> refresh &middot; <kbd>t</kbd> theme &middot; <kbd>Enter</kbd> send a text
+</p>
+
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<div id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title">Are you sure?</h3>
+    <p id="modal-body"></p>
+    <div class="acts">
+      <button class="ghost" id="modal-cancel">Cancel</button>
+      <button class="primary" id="modal-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Secrets. These are real credentials for this machine and must never be
+# committed: .env holds live Twilio/JWT/PII/Blind-index keys, key.txt holds a
+# private key. .env.example IS committed - it is the documented template and
+# contains placeholders only.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+key.txt
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+service-account*.json
+*-service-account.json
+
+# Logs and runtime output
+*.log
+logs/
+npm-debug.log*
+yarn-error.log*
+
+# Test / probe artifacts generated while developing
+t-*.json
+t-*.txt
+t-*.js
+probe-*.js
+probe-*.json
+reg-*.json
+boot-test.log
+
+# Editor and OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local agent/tooling scratch
+.agents/
+.claude/
+.cursor/
+.devin/

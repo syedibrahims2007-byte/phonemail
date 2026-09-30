@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Maskable: artwork is inset so the platform's safe-zone crop cannot clip it. -->
+  <rect width="512" height="512" fill="#0d1117"/>
+  <rect x="146" y="182" width="220" height="172" rx="28" fill="none" stroke="#58a6ff" stroke-width="20"/>
+  <path d="M152 204l104 77 104-77" fill="none" stroke="#58a6ff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="256" cy="398" r="17" fill="#3fb950"/>
+</svg>
